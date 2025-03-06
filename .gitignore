@@ -1,0 +1,20 @@
+# Compiled binaries
+compiled/
+*.o
+*.out
+*.exe
+
+# IDE/Editor files
+.vscode/
+.idea/
+*.swp
+*~
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+matrix_project_env/
