@@ -39,10 +39,10 @@ double calculate_gflops(int n, double seconds) {
     return operations / seconds / 1e9;
 }
 // Function to transpose a matrix
-void transpose_matrix(const std::vector<float>& src, std::vector<float>& dst, int n) {
+void transpose_matrix(const std::vector<float>& B, std::vector<float>& Bt, int n) {
     for (int i = 0; i < n; i++) {
         for (int j = 0; j < n; j++) {
-            dst[j * n + i] = src[i * n + j];
+            Bt[j * n + i] = B[i * n + j];
         }
     }
 }
@@ -69,28 +69,34 @@ int main() {
     // Transpose matrix B
     transpose_matrix(B, Bt, n);
     
-    // Warm-up run
+    // Warm-up run (Using Transposed Matrix)
     matrix_multiply_basic(A, Bt, C, n);
+
+    double avggflops = 0;
+    for (int i = 0; i < 10; i++) {  // Fix: start from i = 0, run exactly 10 times
+        // Timed run
+        auto start = std::chrono::high_resolution_clock::now();
+        matrix_multiply_basic(A, B, C, n);  // Use Bt instead of B
+        auto end = std::chrono::high_resolution_clock::now();
+        
+        // Calculate execution time
+        std::chrono::duration<double> elapsed = end - start;
+        double seconds = elapsed.count();
+        
+        // Calculate GFLOPS
+        double gflops = calculate_gflops(n, seconds);
+        
+        // Display results
+        std::cout << "\nMatrix size: " << n << "×" << n << std::endl;
+        std::cout << "Data type: float (32-bit)" << std::endl;
+        std::cout << "Execution time: " << std::fixed << std::setprecision(4) 
+                << seconds * 1000 << " ms" << std::endl;
+        std::cout << "Performance: " << std::fixed << std::setprecision(4) 
+                << gflops << " GFLOPS" << std::endl;
+        
+        avggflops += gflops;
+    }
     
-    // Timed run
-    auto start = std::chrono::high_resolution_clock::now();
-    matrix_multiply_basic(A, B, C, n);
-    auto end = std::chrono::high_resolution_clock::now();
-    
-    // Calculate execution time
-    std::chrono::duration<double> elapsed = end - start;
-    double seconds = elapsed.count();
-    
-    // Calculate GFLOPS
-    double gflops = calculate_gflops(n, seconds);
-    
-    // Display results
-    std::cout << "\nMatrix size: " << n << "×" << n << std::endl;
-    std::cout << "Data type: float (32-bit)" << std::endl;
-    std::cout << "Execution time: " << std::fixed << std::setprecision(4) 
-              << seconds * 1000 << " ms" << std::endl;
-    std::cout << "Performance: " << std::fixed << std::setprecision(4) 
-              << gflops << " GFLOPS" << std::endl;
-    
+    std::cout << "Average GFLOPS: " << avggflops / 10 << std::endl;
     return 0;
 }

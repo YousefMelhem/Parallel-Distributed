@@ -3,128 +3,114 @@
 #include <chrono>
 #include <random>
 #include <iomanip>
-#include <thread>
 #include <immintrin.h> // For AVX intrinsics
-#include <cstring>  // Add this line for memset
+#include <cstring>     // For memset
+#include <omp.h>       // For OpenMP
 
 // Define alignment for AVX
 #define ALIGN_TO 32
 
-// Aligned matrix multiplication using AVX
-void matrix_multiply_avx(const float* A, const float* B, float* C, int n) {
-    // Zero out the result matrix
-    std::memset(C, 0, n * n * sizeof(float));
-    
-    // For each row of A
-    for (int i = 0; i < n; i++) {
-        // For each column of B
-        for (int j = 0; j < n; j += 8) {
-            // For blocks of 8 columns at a time (AVX register width)
-            if (j + 8 <= n) {
-                // For each element in the row/column
-                for (int k = 0; k < n; k++) {
-                    // Broadcast A[i,k] to all elements of the AVX register
-                    __m256 a = _mm256_set1_ps(A[i * n + k]);
-                    
-                    // Load 8 elements from B
-                    __m256 b = _mm256_loadu_ps(&B[k * n + j]);
-                    
-                    // Load current values from C
-                    __m256 c = _mm256_loadu_ps(&C[i * n + j]);
-                    
-                    // Multiply and add
-                    c = _mm256_add_ps(c, _mm256_mul_ps(a, b));
-                    
-                    // Store result back to C
-                    _mm256_storeu_ps(&C[i * n + j], c);
-                }
-            }
-            else {
-                // Handle edge case where n is not divisible by 8
-                for (int jj = j; jj < n; jj++) {
-                    float sum = 0.0f;
-                    for (int k = 0; k < n; k++) {
-                        sum += A[i * n + k] * B[k * n + jj];
-                    }
-                    C[i * n + jj] = sum;
-                }
-            }
-        }
-    }
-}
+// Cache blocking parameters - adjusted for your specific CPU
+#define BLOCK_SIZE 48  // Optimized for your L1 cache size of 1.1MB
 
-// Multi-threaded AVX matrix multiplication
-void matrix_multiply_avx_parallel(const float* A, const float* B, float* C, int n, int num_threads) {
+// Unroll factor for the innermost loop
+#define UNROLL_FACTOR 4
+
+// Matrix multiplication using OpenMP, AVX, cache blocking and loop unrolling
+void matrix_multiply_optimized(const float* A, const float* B, float* C, int n, int num_threads) {
+    // Set the number of threads for OpenMP
+    omp_set_num_threads(num_threads);
+    
     // Zero out the result matrix
     std::memset(C, 0, n * n * sizeof(float));
     
-    // Create threads
-    std::vector<std::thread> threads;
-    
-    // Function for each thread to execute
-    auto worker = [&](int start_row, int end_row) {
-        // Process assigned rows
-        for (int i = start_row; i < end_row; i++) {
-            // For each column of B
-            for (int j = 0; j < n; j += 8) {
-                // For blocks of 8 columns at a time (AVX register width)
-                if (j + 8 <= n) {
-                    // For each element in the row/column
-                    for (int k = 0; k < n; k++) {
-                        // Broadcast A[i,k] to all elements of the AVX register
-                        __m256 a = _mm256_set1_ps(A[i * n + k]);
-                        
-                        // Load 8 elements from B
-                        __m256 b = _mm256_loadu_ps(&B[k * n + j]);
-                        
-                        // Load current values from C
-                        __m256 c = _mm256_loadu_ps(&C[i * n + j]);
-                        
-                        // Multiply and add
-                        c = _mm256_add_ps(c, _mm256_mul_ps(a, b));
-                        
-                        // Store result back to C
-                        _mm256_storeu_ps(&C[i * n + j], c);
-                    }
-                }
-                else {
-                    // Handle edge case where n is not divisible by 8
-                    for (int jj = j; jj < n; jj++) {
-                        float sum = 0.0f;
-                        for (int k = 0; k < n; k++) {
-                            sum += A[i * n + k] * B[k * n + jj];
+    // Cache blocking approach with loop unrolling
+    #pragma omp parallel
+    {
+        // Each thread will have its own private copy of these variables
+        int i, j, k, ii, jj, kk;
+        
+        // Parallelize the blocked computation
+        #pragma omp for schedule(dynamic)
+        for (ii = 0; ii < n; ii += BLOCK_SIZE) {
+            for (kk = 0; kk < n; kk += BLOCK_SIZE) {
+                for (jj = 0; jj < n; jj += BLOCK_SIZE) {
+                    // Process blocks to maximize cache efficiency
+                    for (i = ii; i < std::min(ii + BLOCK_SIZE, n); i++) {
+                        for (k = kk; k < std::min(kk + BLOCK_SIZE, n); k++) {
+                            // Broadcast A[i,k] to all elements of the AVX register
+                            __m256 a = _mm256_set1_ps(A[i * n + k]);
+                            
+                            // Process mini-blocks with AVX and loop unrolling
+                            // Make sure j doesn't exceed the matrix bounds
+                            int j_limit = std::min(jj + BLOCK_SIZE, n);
+                            
+                            // Main loop with unrolling - process UNROLL_FACTOR * 8 elements at once
+                            for (j = jj; j + (UNROLL_FACTOR * 8) <= j_limit; j += (UNROLL_FACTOR * 8)) {
+                                // Prefetch for better cache behavior
+                                #ifdef __GNUC__
+                                __builtin_prefetch(&B[k * n + j + 64], 0, 3);
+                                __builtin_prefetch(&C[i * n + j + 64], 1, 3);
+                                #endif
+                                
+                                // Unrolled AVX operations - this is the performance hotspot
+                                // Unroll 1
+                                __m256 b0 = _mm256_loadu_ps(&B[k * n + j]);
+                                __m256 c0 = _mm256_loadu_ps(&C[i * n + j]);
+                                c0 = _mm256_add_ps(c0, _mm256_mul_ps(a, b0));
+                                _mm256_storeu_ps(&C[i * n + j], c0);
+                                
+                                // Unroll 2
+                                __m256 b1 = _mm256_loadu_ps(&B[k * n + j + 8]);
+                                __m256 c1 = _mm256_loadu_ps(&C[i * n + j + 8]);
+                                c1 = _mm256_add_ps(c1, _mm256_mul_ps(a, b1));
+                                _mm256_storeu_ps(&C[i * n + j + 8], c1);
+                                
+                                // Unroll 3
+                                __m256 b2 = _mm256_loadu_ps(&B[k * n + j + 16]);
+                                __m256 c2 = _mm256_loadu_ps(&C[i * n + j + 16]);
+                                c2 = _mm256_add_ps(c2, _mm256_mul_ps(a, b2));
+                                _mm256_storeu_ps(&C[i * n + j + 16], c2);
+                                
+                                // Unroll 4
+                                __m256 b3 = _mm256_loadu_ps(&B[k * n + j + 24]);
+                                __m256 c3 = _mm256_loadu_ps(&C[i * n + j + 24]);
+                                c3 = _mm256_add_ps(c3, _mm256_mul_ps(a, b3));
+                                _mm256_storeu_ps(&C[i * n + j + 24], c3);
+                            }
+                            
+                            // Handle remaining elements with normal AVX (no unrolling)
+                            for (; j + 8 <= j_limit; j += 8) {
+                                __m256 b = _mm256_loadu_ps(&B[k * n + j]);
+                                __m256 c = _mm256_loadu_ps(&C[i * n + j]);
+                                c = _mm256_add_ps(c, _mm256_mul_ps(a, b));
+                                _mm256_storeu_ps(&C[i * n + j], c);
+                            }
+                            
+                            // Handle remaining elements (less than 8) with scalar operations
+                            for (; j < j_limit; j++) {
+                                C[i * n + j] += A[i * n + k] * B[k * n + j];
+                            }
                         }
-                        C[i * n + jj] = sum;
                     }
                 }
             }
         }
-    };
-    
-    // Divide work among threads
-    int rows_per_thread = n / num_threads;
-    
-    for (int t = 0; t < num_threads; t++) {
-        int start_row = t * rows_per_thread;
-        int end_row = (t == num_threads - 1) ? n : (t + 1) * rows_per_thread;
-        
-        threads.emplace_back(worker, start_row, end_row);
-    }
-    
-    // Wait for all threads to complete
-    for (auto& thread : threads) {
-        thread.join();
     }
 }
 
 // Function to initialize a matrix with random values
 void initialize_matrix(float* matrix, int n) {
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_real_distribution<float> dis(0.0f, 1.0f);
-    
-    for (int i = 0; i < n * n; i++) {
-        matrix[i] = dis(gen);
+    // Using a different random approach for better parallel behavior
+    #pragma omp parallel
+    {
+        // Each thread gets its own random generator to avoid contention
+        unsigned int seed = omp_get_thread_num() * 1000 + time(NULL);
+        
+        #pragma omp for
+        for (int i = 0; i < n * n; i++) {
+            matrix[i] = static_cast<float>(rand_r(&seed)) / RAND_MAX;
+        }
     }
 }
 
@@ -146,8 +132,46 @@ void free_aligned_memory(float* ptr) {
     _mm_free(ptr);
 }
 
+// Simple verification function to check if the result is correct
+bool verify_result(const float* A, const float* B, const float* C, int n) {
+    // Create a small test matrix for verification
+    const int test_size = std::min(4, n);
+    float* test_result = new float[test_size * test_size]();
+    
+    // Compute a small portion using the standard method
+    for (int i = 0; i < test_size; i++) {
+        for (int j = 0; j < test_size; j++) {
+            float sum = 0.0f;
+            for (int k = 0; k < n; k++) {
+                sum += A[i * n + k] * B[k * n + j];
+            }
+            test_result[i * test_size + j] = sum;
+        }
+    }
+    
+    // Compare with our implementation
+    bool is_correct = true;
+    const float epsilon = 1e-3f; // Allow for small floating-point differences
+    for (int i = 0; i < test_size; i++) {
+        for (int j = 0; j < test_size; j++) {
+            float diff = std::abs(test_result[i * test_size + j] - C[i * n + j]);
+            if (diff > epsilon) {
+                std::cout << "Verification failed at position [" << i << "," << j << "]: "
+                          << "Expected " << test_result[i * test_size + j] 
+                          << ", got " << C[i * n + j] << std::endl;
+                is_correct = false;
+                break;
+            }
+        }
+        if (!is_correct) break;
+    }
+    
+    delete[] test_result;
+    return is_correct;
+}
+
 int main() {
-    std::cout << "Advanced Matrix Multiplication Performance Test" << std::endl;
+    std::cout << "High-Performance Matrix Multiplication Test" << std::endl;
     std::cout << "=============================================" << std::endl;
     
     // Get matrix size from user
@@ -155,11 +179,11 @@ int main() {
     std::cout << "Enter size for the nxn matrices: ";
     std::cin >> n;
     
-    // Align n to be divisible by 8 for AVX
-    int aligned_n = ((n + 7) / 8) * 8;
+    // Align n to be divisible by 32 for better AVX alignment with unrolling
+    int aligned_n = ((n + 31) / 32) * 32;
     if (aligned_n != n) {
         std::cout << "Adjusting matrix size to " << aligned_n 
-                  << " for better AVX alignment" << std::endl;
+                  << " for better alignment with unrolled AVX code" << std::endl;
         n = aligned_n;
     }
     
@@ -172,58 +196,49 @@ int main() {
     initialize_matrix(A, n);
     initialize_matrix(B, n);
     
-    // Get number of CPU cores
-    int num_threads = std::thread::hardware_concurrency();
-    std::cout << "\nDetected " << num_threads << " CPU cores/threads" << std::endl;
+    // Display system information
+    int num_threads = omp_get_max_threads();
+    std::cout << "\nSystem information:" << std::endl;
+    std::cout << "- CPU threads: " << num_threads << std::endl;
+    std::cout << "- Cache block size: " << BLOCK_SIZE << std::endl;
+    std::cout << "- Unroll factor: " << UNROLL_FACTOR << std::endl;
+    std::cout << "- Matrix size: " << n << "x" << n << " (" << (n*n*sizeof(float))/1048576.0 << " MB per matrix)" << std::endl;
     
-    // Single-threaded AVX implementation
+    // Run optimized version with measurement
     {
-        // Warm-up run
-        matrix_multiply_avx(A, B, C, n);
+        // Warm-up run (important for accurate benchmarking)
+        matrix_multiply_optimized(A, B, C, n, num_threads);
         
         // Timed run
         auto start = std::chrono::high_resolution_clock::now();
-        matrix_multiply_avx(A, B, C, n);
+        
+        // Multiple runs for more stable measurements
+        const int NUM_RUNS = 3;
+        for (int run = 0; run < NUM_RUNS; run++) {
+            matrix_multiply_optimized(A, B, C, n, num_threads);
+        }
+        
         auto end = std::chrono::high_resolution_clock::now();
         
-        // Calculate execution time
+        // Calculate average execution time
         std::chrono::duration<double> elapsed = end - start;
-        double seconds = elapsed.count();
+        double seconds = elapsed.count() / NUM_RUNS;
         
         // Calculate GFLOPS
         double gflops = calculate_gflops(n, seconds);
         
         // Display results
-        std::cout << "\nSingle-threaded AVX implementation:" << std::endl;
-        std::cout << "Execution time: " << std::fixed << std::setprecision(4) 
+        std::cout << "\nOptimized implementation (" << num_threads << " threads):" << std::endl;
+        std::cout << "Execution time: " << std::fixed << std::setprecision(2) 
                   << seconds * 1000 << " ms" << std::endl;
-        std::cout << "Performance: " << std::fixed << std::setprecision(4) 
+        std::cout << "Performance: " << std::fixed << std::setprecision(2) 
                   << gflops << " GFLOPS" << std::endl;
-    }
-    
-    // Multi-threaded AVX implementation
-    {
-        // Warm-up run
-        matrix_multiply_avx_parallel(A, B, C, n, num_threads);
+        std::cout << "Efficiency: " << std::fixed << std::setprecision(2)
+                  << (gflops / num_threads) << " GFLOPS per thread" << std::endl;
         
-        // Timed run
-        auto start = std::chrono::high_resolution_clock::now();
-        matrix_multiply_avx_parallel(A, B, C, n, num_threads);
-        auto end = std::chrono::high_resolution_clock::now();
-        
-        // Calculate execution time
-        std::chrono::duration<double> elapsed = end - start;
-        double seconds = elapsed.count();
-        
-        // Calculate GFLOPS
-        double gflops = calculate_gflops(n, seconds);
-        
-        // Display results
-        std::cout << "\nParallel AVX implementation (" << num_threads << " threads):" << std::endl;
-        std::cout << "Execution time: " << std::fixed << std::setprecision(4) 
-                  << seconds * 1000 << " ms" << std::endl;
-        std::cout << "Performance: " << std::fixed << std::setprecision(4) 
-                  << gflops << " GFLOPS" << std::endl;
+        // Verify the result
+        bool is_correct = verify_result(A, B, C, n);
+        std::cout << "Result verification: " << (is_correct ? "PASSED" : "FAILED") << std::endl;
     }
     
     // Free allocated memory
